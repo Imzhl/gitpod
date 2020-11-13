@@ -4,12 +4,14 @@
  * See License-AGPL.txt in the project root for license information.
  */
 
-import { User, WorkspaceInfo, WorkspaceCreationResult, UserMessage, WorkspaceInstanceUser,
+import {
+    User, WorkspaceInfo, WorkspaceCreationResult, UserMessage, WorkspaceInstanceUser,
     WhitelistedRepository, WorkspaceImageBuild, AuthProviderInfo, Branding, CreateWorkspaceMode,
     Token, UserEnvVarValue, ResolvePluginsParams, PreparePluginUploadParams,
-    ResolvedPlugins, Configuration, InstallPluginsParams, UninstallPluginParams, UserInfo, GitpodTokenType, GitpodToken, AuthProviderEntry } from './protocol';
+    ResolvedPlugins, Configuration, InstallPluginsParams, UninstallPluginParams, UserInfo, GitpodTokenType, GitpodToken, AuthProviderEntry
+} from './protocol';
 import { JsonRpcProxy, JsonRpcServer } from './messaging/proxy-factory';
-import { Disposable } from 'vscode-jsonrpc';
+import { Disposable, ConnectionError } from 'vscode-jsonrpc';
 import { HeadlessLogEvent } from './headless-workspace-log';
 import { WorkspaceInstance, WorkspaceInstancePort } from './workspace-instance';
 import { AdminServer } from './admin-protocol';
@@ -17,6 +19,7 @@ import { GitpodHostUrl } from './util/gitpod-host-url';
 import { WebSocketConnectionProvider } from './messaging/browser/connection';
 import { PermissionName } from './permission';
 import { LicenseService } from './license-protocol';
+import { Emitter } from './util/event';
 
 export interface GitpodClient {
     onInstanceUpdate(instance: WorkspaceInstance): void;
@@ -69,7 +72,7 @@ export interface GitpodServer extends JsonRpcServer<GitpodClient>, AdminServer, 
     watchWorkspaceImageBuildLogs(workspaceId: string): Promise<void>;
     watchHeadlessWorkspaceLogs(workspaceId: string): Promise<void>;
     isPrebuildAvailable(pwsid: string): Promise<boolean>;
-    
+
     // Workspace timeout
     setWorkspaceTimeout(workspaceId: string, duration: WorkspaceTimeoutDuration): Promise<SetWorkspaceTimeoutResult>;
     getWorkspaceTimeout(workspaceId: string): Promise<GetWorkspaceTimeoutResult>;
@@ -137,13 +140,13 @@ export interface GitpodServer extends JsonRpcServer<GitpodClient>, AdminServer, 
 
 export const WorkspaceTimeoutValues = ["30m", "60m", "180m"] as const;
 
-export const createServiceMock = function<C extends GitpodClient, S extends GitpodServer>(methods: Partial<JsonRpcProxy<S>>): GitpodServiceImpl<C, S> {
+export const createServiceMock = function <C extends GitpodClient, S extends GitpodServer>(methods: Partial<JsonRpcProxy<S>>): GitpodServiceImpl<C, S> {
     return new GitpodServiceImpl<C, S>(createServerMock(methods));
 }
 
-export const createServerMock = function<C extends GitpodClient, S extends GitpodServer>(methods: Partial<JsonRpcProxy<S>>): JsonRpcProxy<S> {
-    methods.setClient = methods.setClient || (() => {});
-    methods.dispose = methods.dispose || (() => {});
+export const createServerMock = function <C extends GitpodClient, S extends GitpodServer>(methods: Partial<JsonRpcProxy<S>>): JsonRpcProxy<S> {
+    methods.setClient = methods.setClient || (() => { });
+    methods.dispose = methods.dispose || (() => { });
     return new Proxy<JsonRpcProxy<S>>(methods as any as JsonRpcProxy<S>, {
         get: (target: S, property: keyof S) => {
             const result = target[property];
@@ -225,7 +228,7 @@ export namespace GitpodServer {
     export interface GenerateNewGitpodTokenOptions {
         name?: string
         type: GitpodTokenType
-        scopes?: string[] 
+        scopes?: string[]
     }
 }
 
@@ -235,7 +238,6 @@ export const GitpodServerProxy = Symbol('GitpodServerProxy');
 export type GitpodServerProxy<S extends GitpodServer> = JsonRpcProxy<S>;
 
 export class GitpodCompositeClient<Client extends GitpodClient> implements GitpodClient {
-
     protected clients: Partial<Client>[] = [];
 
     public registerClient(client: Partial<Client>): Disposable {
@@ -283,9 +285,54 @@ export class GitpodCompositeClient<Client extends GitpodClient> implements Gitpo
             }
         }
     }
+
 }
 
-export type GitpodService = GitpodServiceImpl<GitpodClient, GitpodServer>
+export type GitpodService = GitpodServiceImpl<GitpodClient, GitpodServer>;
+
+const hasWindow = (typeof window !== 'undefined');
+export class WorkspaceInstanceUpdateListener {
+    private readonly onDidChangeEmitter = new Emitter<void>();
+    readonly onDidChange = this.onDidChangeEmitter.event;
+
+    get info(): WorkspaceInfo {
+        return this._info;
+    }
+
+    constructor(
+        private readonly service: GitpodService,
+        private _info: WorkspaceInfo
+    ) {
+        service.registerClient({
+            onInstanceUpdate: instance => {
+                if (instance.workspaceId === this._info.workspace.id) {
+                    this._info.latestInstance = instance;
+                    this.onDidChangeEmitter.fire();
+                }
+            }
+        });
+        this.updateInfo();
+        service.server.onDidOpenConnection(() => this.updateInfo());
+        if (hasWindow) {
+            // learn about page lifecycle here: https://developers.google.com/web/updates/2018/07/page-lifecycle-api
+            window.document.addEventListener('visibilitychange', async () => {
+                if (window.document.visibilityState === 'visible') {
+                    this.updateInfo();
+                }
+            });
+            window.addEventListener('pageshow', e => {
+                if (e.persisted) {
+                    this.updateInfo();
+                }
+            });
+        }
+    }
+
+    private async updateInfo(): Promise<void> {
+        this._info = await this.service.server.getWorkspace(this._info.workspace.id);
+        this.onDidChangeEmitter.fire();
+    }
+}
 
 export class GitpodServiceImpl<Client extends GitpodClient, Server extends GitpodServer> {
 
@@ -297,6 +344,26 @@ export class GitpodServiceImpl<Client extends GitpodClient, Server extends Gitpo
 
     public registerClient(client: Partial<Client>): Disposable {
         return this.compositeClient.registerClient(client);
+    }
+
+    private readonly instanceListeners = new Map<string, Promise<WorkspaceInstanceUpdateListener>>();
+    listenToInstance(workspaceId: string): Promise<WorkspaceInstanceUpdateListener> {
+        const listener = this.instanceListeners.get(workspaceId) ||
+            (async () => {
+                while (true) {
+                    try {
+                        const info = await this.server.getWorkspace(workspaceId);
+                        return new WorkspaceInstanceUpdateListener(this, info);
+                    } catch (e) {
+                        if (e instanceof ConnectionError) {
+                            continue;
+                        }
+                        throw e;
+                    }
+                }
+            })();
+        this.instanceListeners.set(workspaceId, listener);
+        return listener;
     }
 }
 
