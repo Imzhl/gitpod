@@ -23,6 +23,8 @@ function createGitpodServiceInternal<C extends GitpodClient, S extends GitpodSer
         const connection = createWindowMessageConnection('gitpodServer', window.parent, '*');
         const factory = new JsonRpcProxyFactory<S>();
         proxy = factory.createProxy();
+        proxy.onDidOpenConnection(() => factory['onDidOpenConnectionEmitter'].fire(undefined))
+        proxy.onDidCloseConnection(() => factory['onDidCloseConnectionEmitter'].fire(undefined))
         factory.listen(connection);
     } else {
         let host = new GitpodHostUrl(window.location.toString())

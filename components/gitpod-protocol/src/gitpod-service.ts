@@ -25,6 +25,11 @@ export interface GitpodClient {
     onInstanceUpdate(instance: WorkspaceInstance): void;
     onWorkspaceImageBuildLogs: WorkspaceImageBuild.LogCallback;
     onHeadlessWorkspaceLogs(evt: HeadlessLogEvent): void;
+
+    //#region propagating reconnection to iframe
+    onDidOpenConnection(): void;
+    onDidCloseConnection(): void;
+    //#endregion
 }
 
 export const GitpodServer = Symbol('GitpodServer');
@@ -286,6 +291,30 @@ export class GitpodCompositeClient<Client extends GitpodClient> implements Gitpo
         }
     }
 
+    onDidOpenConnection(): void {
+        for (const client of this.clients) {
+            if (client.onDidOpenConnection) {
+                try {
+                    client.onDidOpenConnection();
+                } catch (error) {
+                    console.error(error)
+                }
+            }
+        }
+    }
+
+    onDidCloseConnection(): void {
+        for (const client of this.clients) {
+            if (client.onDidCloseConnection) {
+                try {
+                    client.onDidCloseConnection();
+                } catch (error) {
+                    console.error(error)
+                }
+            }
+        }
+    }
+
 }
 
 export type GitpodService = GitpodServiceImpl<GitpodClient, GitpodServer>;
@@ -340,6 +369,8 @@ export class GitpodServiceImpl<Client extends GitpodClient, Server extends Gitpo
 
     constructor(public readonly server: JsonRpcProxy<Server>) {
         server.setClient(this.compositeClient);
+        server.onDidOpenConnection(() => this.compositeClient.onDidOpenConnection());
+        server.onDidCloseConnection(() => this.compositeClient.onDidCloseConnection());
     }
 
     public registerClient(client: Partial<Client>): Disposable {
