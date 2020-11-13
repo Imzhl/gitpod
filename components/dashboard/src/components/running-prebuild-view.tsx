@@ -4,14 +4,14 @@
  * See License-AGPL.txt in the project root for license information.
  */
 
-import * as React from 'react';
-import Button from "@material-ui/core/Button";
-import { GitpodService, RunningWorkspacePrebuildStarting } from "@gitpod/gitpod-protocol";
-import { CubeFrame } from "./cube-frame";
-import { WorkspaceLogView } from "./workspace-log-view";
+import { DisposableCollection, GitpodService, RunningWorkspacePrebuildStarting } from "@gitpod/gitpod-protocol";
 import { HeadlessWorkspaceEventType } from '@gitpod/gitpod-protocol/lib/headless-workspace-log';
-import { WithBranding } from './with-branding';
+import Button from "@material-ui/core/Button";
+import * as React from 'react';
 import { Context } from '../context';
+import { CubeFrame } from "./cube-frame";
+import { WithBranding } from './with-branding';
+import { WorkspaceLogView } from "./workspace-log-view";
 
 export interface RunningPrebuildViewProps {
     service: GitpodService;
@@ -50,14 +50,18 @@ export class RunningPrebuildView extends React.Component<RunningPrebuildViewProp
                     buildIsDone = true;
                     this.props.onBuildDone(HeadlessWorkspaceEventType.didFinish(evt.type));
                 }
-            },
-            onInstanceUpdate: () => {},
-            onWorkspaceImageBuildLogs: () => {}
+            }
         });
     }
 
+    private readonly toDispose = new DisposableCollection();
     componentWillMount() {
-        this.props.service.server.watchHeadlessWorkspaceLogs(this.props.prebuildingWorkspaceId);
+        const server = this.props.service.server;
+        server.watchHeadlessWorkspaceLogs(this.props.prebuildingWorkspaceId);
+        this.toDispose.push(server.onDidOpenConnection(() => server.watchHeadlessWorkspaceLogs(this.props.prebuildingWorkspaceId)));
+    }
+    componentWillUnmount() {
+        this.toDispose.dispose();
     }
 
     public render() {
