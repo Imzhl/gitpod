@@ -69,7 +69,6 @@ export class IDESettings extends React.Component<IDESettingsProps, IDESettingsSt
         return <React.Fragment>
             {this.renderRadio('Theia', 'theia')}
             {this.renderRadio('Code', 'code')}
-            {this.renderRadio('IDE Image:', 'image')}
         </React.Fragment>
     }
 
@@ -97,13 +96,10 @@ export class IDESettings extends React.Component<IDESettingsProps, IDESettingsSt
 
     protected updateIDESettings = debounce(async ({ value, image }: IDESettingsState) => {
         try {
-            ;
             const settings = this.state.additionalData?.ideSettings || {};
             if (value === 'theia') {
                 delete settings.defaultIde;
-            } else if (value === 'image') {
-                settings.defaultIde = image;
-            } else {
+            } else if (image === 'code') {
                 settings.defaultIde = value;
             }
             const additionalData = (this.state.additionalData || {});
