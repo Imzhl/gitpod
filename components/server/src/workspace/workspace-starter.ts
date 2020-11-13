@@ -232,8 +232,13 @@ export class WorkspaceStarter {
      */
     protected async newInstance(workspace: Workspace, user: User): Promise<WorkspaceInstance> {
         const theiaVersion = this.env.theiaVersion;
+        const ideImage = this.env.ideDefaultImage;
+        
+        // TODO(cw): once we allow changing the IDE in the workspace config (i.e. .gitpod.yml), we must
+        //           give that value precedence over the default choice.
         const configuration: WorkspaceInstanceConfiguration = {
-            theiaVersion
+            theiaVersion,
+            ideImage,
         };
 
         let featureFlags: NamedWorkspaceFeatureFlag[] = workspace.config._featureFlags || [];
@@ -248,6 +253,19 @@ export class WorkspaceStarter {
         if (!this.authService.hasPermission(user, "privileged-ws")) {
             featureFlags = featureFlags.filter(f => f != "privileged");
         }
+
+        // if the user has experimental features enabled, we need to add the respective feature flags.
+        // Beware: all feature flags we add here are not workspace-persistent feature flags, e.g. no full-workspace backup.
+        if (!!user.additionalData?.experimentalFeatures) {
+            featureFlags = featureFlags.concat(this.env.experimentalFeatureFlags.filter(f => !featureFlags.includes(f)));
+
+            if (!!user.additionalData?.ideSettings?.defaultIde) {
+                configuration.ideImage = this.env.ideImageAliases[user.additionalData?.ideSettings?.defaultIde];
+            } else {
+                configuration.ideImage = this.env.ideDefaultImage;
+            }
+        }
+
         if (!!featureFlags) {
             // only set feature flags if there actually are any. Otherwise we waste the
             // few bytes of JSON in the database for no good reason.
@@ -565,9 +583,17 @@ export class WorkspaceStarter {
         const userTimeoutPromise = this.userService.getDefaultWorkspaceTimeout(user);
 
         const featureFlags = instance.configuration!.featureFlags || [];
-        let ideImage = workspace.config.ide;
-        if (!ideImage || featureFlags.every(f => f !== 'registry_facade')) {
+
+        let ideImage: string;
+        if (!featureFlags.includes('registry_facade')) {
+            // We don't have registry facade enabled. Theia is the only IDE we support in this mode.
+            // We assemble the image name here instead of resorting to env.ideDefaultImage, because
+            // the latter might not be Theia after all.
             ideImage = `${this.env.theiaImageRepo}:${instance.configuration!.theiaVersion}`
+        } else if (!!instance.configuration?.ideImage) {
+            ideImage = instance.configuration?.ideImage;
+        } else {
+            ideImage = this.env.ideDefaultImage;
         }
 
         const spec = new StartWorkspaceSpec();
