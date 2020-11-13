@@ -26,6 +26,55 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+var (
+	forwardedSignals = []os.Signal{
+		unix.SIGABRT,
+		unix.SIGALRM,
+		unix.SIGBUS,
+		unix.SIGCHLD,
+		unix.SIGCLD,
+		unix.SIGCONT,
+		unix.SIGFPE,
+		unix.SIGHUP,
+		unix.SIGILL,
+		unix.SIGINT,
+		unix.SIGIO,
+		unix.SIGIOT,
+		unix.SIGKILL,
+		unix.SIGPIPE,
+		unix.SIGPOLL,
+		unix.SIGPROF,
+		unix.SIGPWR,
+		unix.SIGQUIT,
+		unix.SIGSEGV,
+		unix.SIGSTKFLT,
+		unix.SIGSTOP,
+		unix.SIGSYS,
+		unix.SIGTERM,
+		unix.SIGTRAP,
+		unix.SIGTSTP,
+		unix.SIGTTIN,
+		unix.SIGTTOU,
+		unix.SIGURG,
+		unix.SIGUSR1,
+		unix.SIGUSR2,
+		unix.SIGVTALRM,
+		unix.SIGWINCH,
+		unix.SIGXCPU,
+		unix.SIGXFSZ,
+	}
+)
+
+const (
+	// ring1ShutdownTimeout is the time ring1 gets between SIGTERM and SIGKILL.
+	// We do this to ensure we have enough time left for ring0 to clean up prior
+	// to receiving SIGKILL from the kubelet.
+	//
+	// This time must give ring1 enough time to shut down (see time budgets in supervisor.go),
+	// and to talk to ws-daemon within the terminationGracePeriod of the workspace pod.
+	ring1ShutdownTimeout = 20 * time.Second
+)
+
 var ring0Cmd = &cobra.Command{
 	Use:    "ring0",
 	Short:  "starts the supervisor ring0",
@@ -83,8 +132,31 @@ var ring0Cmd = &cobra.Command{
 			failed = true
 			return
 		}
-		sigc := sigproxy.ForwardAllSignals(context.Background(), cmd.Process.Pid)
-		defer sigproxysignal.StopCatch(sigc)
+
+		sigc := make(chan os.Signal, 128)
+		signal.Notify(sigc, forwardedSignals...)
+		go func() {
+			for {
+				sig := <-sigc
+				if sig != unix.SIGTERM {
+					cmd.Process.Signal(sig)
+					continue
+				}
+
+				cmd.Process.Signal(unix.SIGTERM)
+				time.Sleep(ring1ShutdownTimeout)
+				if cmd.Process == nil {
+					return
+				}
+
+				log.Warn("ring1 did not shut down in time - sending sigkill")
+				err = cmd.Process.Kill()
+				if err != nil {
+					log.WithError(err).Error("cannot kill ring1")
+				}
+				return
+			}
+		}()
 
 		err = cmd.Wait()
 		if err != nil {
